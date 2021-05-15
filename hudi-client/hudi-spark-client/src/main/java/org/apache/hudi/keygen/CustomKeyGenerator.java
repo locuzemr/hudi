@@ -90,7 +90,7 @@ public class CustomKeyGenerator extends BuiltinKeyGenerator {
       return "";
     }
     for (String field : getPartitionPathFields()) {
-      String[] fieldWithType = field.split(customAvroKeyGenerator.getSplitRegex());
+      String[] fieldWithType = field.split(customAvroKeyGenerator.SPLIT_REGEX);
       if (fieldWithType.length != 2) {
         throw new HoodieKeyGeneratorException("Unable to find field names for partition path in proper format");
       }
@@ -113,7 +113,7 @@ public class CustomKeyGenerator extends BuiltinKeyGenerator {
               partitionPath.append(new TimestampBasedKeyGenerator(config, partitionPathField).getPartitionPath(row.get()));
             }
           } catch (IOException ioe) {
-            throw new HoodieKeyGeneratorException("Unable to initialise TimestampBasedKeyGenerator class");
+            throw new HoodieKeyGeneratorException("Unable to initialise TimestampBasedKeyGenerator class", ioe);
           }
           break;
         default:

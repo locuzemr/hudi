@@ -18,8 +18,8 @@
 
 package org.apache.hudi.table.action.commit;
 
-import org.apache.hudi.client.common.HoodieEngineContext;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
+import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.HoodieBaseFile;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
@@ -120,13 +120,38 @@ public class UpsertPartitioner<T extends HoodieRecordPayload<T>> extends Partiti
   private int addUpdateBucket(String partitionPath, String fileIdHint) {
     int bucket = totalBuckets;
     updateLocationToBucket.put(fileIdHint, bucket);
-    BucketInfo bucketInfo = new BucketInfo();
-    bucketInfo.bucketType = BucketType.UPDATE;
-    bucketInfo.fileIdPrefix = fileIdHint;
-    bucketInfo.partitionPath = partitionPath;
+    BucketInfo bucketInfo = new BucketInfo(BucketType.UPDATE, fileIdHint, partitionPath);
     bucketInfoMap.put(totalBuckets, bucketInfo);
     totalBuckets++;
     return bucket;
+  }
+
+  /**
+   * Get the in pending clustering fileId for each partition path.
+   * @return partition path to pending clustering file groups id
+   */
+  private Map<String, Set<String>> getPartitionPathToPendingClusteringFileGroupsId() {
+    Map<String, Set<String>>  partitionPathToInPendingClusteringFileId =
+        table.getFileSystemView().getFileGroupsInPendingClustering()
+            .map(fileGroupIdAndInstantPair ->
+                Pair.of(fileGroupIdAndInstantPair.getKey().getPartitionPath(), fileGroupIdAndInstantPair.getKey().getFileId()))
+            .collect(Collectors.groupingBy(Pair::getKey, Collectors.mapping(Pair::getValue, Collectors.toSet())));
+    return partitionPathToInPendingClusteringFileId;
+  }
+
+  /**
+   * Exclude small file handling for clustering since update path is not supported.
+   * @param pendingClusteringFileGroupsId  pending clustering file groups id of partition
+   * @param smallFiles small files of partition
+   * @return smallFiles not in clustering
+   */
+  private List<SmallFile> filterSmallFilesInClustering(final Set<String> pendingClusteringFileGroupsId, final List<SmallFile> smallFiles) {
+    if (this.config.isClusteringEnabled()) {
+      return smallFiles.stream()
+          .filter(smallFile -> !pendingClusteringFileGroupsId.contains(smallFile.location.getFileId())).collect(Collectors.toList());
+    } else {
+      return smallFiles;
+    }
   }
 
   private void assignInserts(WorkloadProfile profile, HoodieEngineContext context) {
@@ -140,11 +165,16 @@ public class UpsertPartitioner<T extends HoodieRecordPayload<T>> extends Partiti
     Map<String, List<SmallFile>> partitionSmallFilesMap =
         getSmallFilesForPartitions(new ArrayList<String>(partitionPaths), context);
 
+    Map<String, Set<String>> partitionPathToPendingClusteringFileGroupsId = getPartitionPathToPendingClusteringFileGroupsId();
+
     for (String partitionPath : partitionPaths) {
       WorkloadStat pStat = profile.getWorkloadStat(partitionPath);
       if (pStat.getNumInserts() > 0) {
 
-        List<SmallFile> smallFiles = partitionSmallFilesMap.get(partitionPath);
+        List<SmallFile> smallFiles =
+            filterSmallFilesInClustering(partitionPathToPendingClusteringFileGroupsId.getOrDefault(partitionPath, Collections.emptySet()),
+                partitionSmallFilesMap.get(partitionPath));
+
         this.smallFiles.addAll(smallFiles);
 
         LOG.info("For partitionPath : " + partitionPath + " Small Files => " + smallFiles);
@@ -185,11 +215,12 @@ public class UpsertPartitioner<T extends HoodieRecordPayload<T>> extends Partiti
               + ", totalInsertBuckets => " + insertBuckets + ", recordsPerBucket => " + insertRecordsPerBucket);
           for (int b = 0; b < insertBuckets; b++) {
             bucketNumbers.add(totalBuckets);
-            recordsPerBucket.add(totalUnassignedInserts / insertBuckets);
-            BucketInfo bucketInfo = new BucketInfo();
-            bucketInfo.bucketType = BucketType.INSERT;
-            bucketInfo.partitionPath = partitionPath;
-            bucketInfo.fileIdPrefix = FSUtils.createNewFileIdPfx();
+            if (b < insertBuckets - 1) {
+              recordsPerBucket.add(insertRecordsPerBucket);
+            } else {
+              recordsPerBucket.add(totalUnassignedInserts - (insertBuckets - 1) * insertRecordsPerBucket);
+            }
+            BucketInfo bucketInfo = new BucketInfo(BucketType.INSERT, FSUtils.createNewFileIdPfx(), partitionPath);
             bucketInfoMap.put(totalBuckets, bucketInfo);
             totalBuckets++;
           }

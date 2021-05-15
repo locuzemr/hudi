@@ -41,17 +41,23 @@ public class FlexibleSchemaRecordGenerationIterator implements Iterator<GenericR
   private GenericRecord lastRecord;
   // Partition path field name
   private Set<String> partitionPathFieldNames;
+  private String firstPartitionPathField;
 
   public FlexibleSchemaRecordGenerationIterator(long maxEntriesToProduce, String schema) {
-    this(maxEntriesToProduce, GenericRecordFullPayloadGenerator.DEFAULT_PAYLOAD_SIZE, schema, null, 0);
+    this(maxEntriesToProduce, GenericRecordFullPayloadGenerator.DEFAULT_PAYLOAD_SIZE, schema, null,
+        GenericRecordFullPayloadGenerator.DEFAULT_NUM_DATE_PARTITIONS,
+        GenericRecordFullPayloadGenerator.DEFAULT_START_PARTITION);
   }
 
   public FlexibleSchemaRecordGenerationIterator(long maxEntriesToProduce, int minPayloadSize, String schemaStr,
-      List<String> partitionPathFieldNames, int partitionIndex) {
+      List<String> partitionPathFieldNames, int numPartitions, int startPartition) {
     this.counter = maxEntriesToProduce;
     this.partitionPathFieldNames = new HashSet<>(partitionPathFieldNames);
+    if (partitionPathFieldNames != null && partitionPathFieldNames.size() > 0) {
+      this.firstPartitionPathField = partitionPathFieldNames.get(0);
+    }
     Schema schema = new Schema.Parser().parse(schemaStr);
-    this.generator = new GenericRecordFullPayloadGenerator(schema, minPayloadSize, partitionIndex);
+    this.generator = new GenericRecordFullPayloadGenerator(schema, minPayloadSize, numPartitions, startPartition);
   }
 
   @Override
@@ -62,12 +68,18 @@ public class FlexibleSchemaRecordGenerationIterator implements Iterator<GenericR
   @Override
   public GenericRecord next() {
     this.counter--;
+    boolean partitionPathsNonEmpty = partitionPathFieldNames != null && partitionPathFieldNames.size() > 0;
     if (lastRecord == null) {
-      GenericRecord record = this.generator.getNewPayload(partitionPathFieldNames);
+      GenericRecord record = partitionPathsNonEmpty
+          ? this.generator.getNewPayloadWithTimestamp(this.firstPartitionPathField)
+          : this.generator.getNewPayload(partitionPathFieldNames);
       lastRecord = record;
       return record;
     } else {
-      return this.generator.randomize(lastRecord, partitionPathFieldNames);
+      return partitionPathsNonEmpty
+          ? this.generator.getUpdatePayloadWithTimestamp(lastRecord,
+          this.partitionPathFieldNames, firstPartitionPathField)
+          : this.generator.getUpdatePayload(lastRecord, this.partitionPathFieldNames);
     }
   }
 }

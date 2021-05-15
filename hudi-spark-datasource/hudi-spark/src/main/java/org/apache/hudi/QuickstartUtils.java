@@ -23,6 +23,7 @@ import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.OverwriteWithLatestAvroPayload;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
 
 import org.apache.avro.Schema;
@@ -31,7 +32,6 @@ import org.apache.avro.generic.GenericRecord;
 import org.apache.spark.sql.Row;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -121,9 +121,20 @@ public class QuickstartUtils {
      */
     public static OverwriteWithLatestAvroPayload generateRandomValue(HoodieKey key, String riderDriverSuffix)
         throws IOException {
+      // The timestamp generated is limited to range from 7 days before to now, to avoid generating too many
+      // partitionPaths when user use timestamp as partitionPath filed.
       GenericRecord rec =
-          generateGenericRecord(key.getRecordKey(), "rider-" + riderDriverSuffix, "driver-" + riderDriverSuffix, 0);
+          generateGenericRecord(key.getRecordKey(), "rider-" + riderDriverSuffix, "driver-"
+              + riderDriverSuffix, generateRangeRandomTimestamp(7));
       return new OverwriteWithLatestAvroPayload(Option.of(rec));
+    }
+
+    /**
+     * Generate timestamp range from {@param daysTillNow} before to now.
+     */
+    private static long generateRangeRandomTimestamp(int daysTillNow) {
+      long maxIntervalMillis = daysTillNow * 24 * 60 * 60 * 1000L;
+      return System.currentTimeMillis() - (long)(Math.random() * maxIntervalMillis);
     }
 
     /**
@@ -164,15 +175,18 @@ public class QuickstartUtils {
      * @param n Number of updates (including dups)
      * @return list of hoodie record updates
      */
-    public List<HoodieRecord> generateUpdates(Integer n) throws IOException {
-      String randomString = generateRandomString();
-      List<HoodieRecord> updates = new ArrayList<>();
-      for (int i = 0; i < n; i++) {
-        HoodieKey key = existingKeys.get(rand.nextInt(numExistingKeys));
-        HoodieRecord record = generateUpdateRecord(key, randomString);
-        updates.add(record);
+    public List<HoodieRecord> generateUpdates(Integer n) {
+      if (numExistingKeys == 0) {
+        throw new HoodieException("Data must have been written before performing the update operation");
       }
-      return updates;
+      String randomString = generateRandomString();
+      return IntStream.range(0, n).boxed().map(x -> {
+        try {
+          return generateUpdateRecord(existingKeys.get(rand.nextInt(numExistingKeys)), randomString);
+        } catch (IOException e) {
+          throw new HoodieIOException(e.getMessage(), e);
+        }
+      }).collect(Collectors.toList());
     }
 
     /**
@@ -182,8 +196,12 @@ public class QuickstartUtils {
      * @return list of hoodie records to delete
      */
     public List<String> generateDeletes(List<Row> rows) {
-      return rows.stream().map(row ->
-          convertToString(row.getAs("uuid"), row.getAs("partitionpath"))).filter(os -> os.isPresent()).map(os -> os.get())
+      // if row.length() == 2, then the record contains "uuid" and "partitionpath" fields, otherwise,
+      // another field "ts" is available
+      return rows.stream().map(row -> row.length() == 2
+          ? convertToString(row.getAs("uuid"), row.getAs("partitionpath"), null) :
+          convertToString(row.getAs("uuid"), row.getAs("partitionpath"), row.getAs("ts"))
+      ).filter(os -> os.isPresent()).map(os -> os.get())
           .collect(Collectors.toList());
     }
 
@@ -204,10 +222,10 @@ public class QuickstartUtils {
     }
   }
 
-  private static Option<String> convertToString(String uuid, String partitionPath) {
+  private static Option<String> convertToString(String uuid, String partitionPath, Long ts) {
     StringBuffer stringBuffer = new StringBuffer();
     stringBuffer.append("{");
-    stringBuffer.append("\"ts\": 0.0,");
+    stringBuffer.append("\"ts\": \"" + (ts == null ? "0.0" : ts) + "\",");
     stringBuffer.append("\"uuid\": \"" + uuid + "\",");
     stringBuffer.append("\"partitionpath\": \"" + partitionPath + "\"");
     stringBuffer.append("}");

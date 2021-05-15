@@ -41,6 +41,17 @@ public abstract class DagNode<O> implements Comparable<DagNode<O>> {
   protected Config config;
   private boolean isCompleted;
 
+  public DagNode clone() {
+    List<DagNode<O>> tempChildNodes = new ArrayList<>();
+    for(DagNode dagNode: childNodes) {
+      tempChildNodes.add(dagNode.clone());
+    }
+    this.childNodes = tempChildNodes;
+    this.result = null;
+    this.isCompleted = false;
+    return this;
+  }
+
   public DagNode<O> addChildNode(DagNode childNode) {
     childNode.getParentNodes().add(this);
     getChildNodes().add(childNode);
@@ -80,9 +91,10 @@ public abstract class DagNode<O> implements Comparable<DagNode<O>> {
    * Execute the {@link DagNode}.
    *
    * @param context The context needed for an execution of a node.
+   * @param curItrCount iteration count for executing the node.
    * @throws Exception Thrown if the execution failed.
    */
-  public abstract void execute(ExecutionContext context) throws Exception;
+  public abstract void execute(ExecutionContext context, int curItrCount) throws Exception;
 
   public boolean isCompleted() {
     return isCompleted;

@@ -57,9 +57,12 @@ import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieCommitException;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
+import org.apache.hudi.exception.HoodieMetadataException;
 import org.apache.hudi.execution.SparkBoundedInMemoryExecutor;
 import org.apache.hudi.io.HoodieBootstrapHandle;
 import org.apache.hudi.keygen.KeyGeneratorInterface;
+import org.apache.hudi.metadata.HoodieTableMetadataWriter;
+import org.apache.hudi.metadata.SparkHoodieBackedTableMetadataWriter;
 import org.apache.hudi.table.HoodieSparkTable;
 import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
@@ -222,6 +225,17 @@ public class SparkBootstrapCommitActionExecutor<T extends HoodieRecordPayload<T>
     LOG.info("Committing metadata bootstrap !!");
   }
 
+  @Override
+  protected void syncTableMetadata() {
+    // Open up the metadata table again, for syncing
+    try (HoodieTableMetadataWriter writer =
+             SparkHoodieBackedTableMetadataWriter.create(hadoopConf, config, context)) {
+      LOG.info("Successfully synced to metadata table");
+    } catch (Exception e) {
+      throw new HoodieMetadataException("Error syncing to metadata table.", e);
+    }
+  }
+
   protected void commit(Option<Map<String, String>> extraMetadata, HoodieWriteMetadata<JavaRDD<WriteStatus>> result, List<HoodieWriteStat> stats) {
     String actionType = table.getMetaClient().getCommitActionType();
     LOG.info("Committing " + instantTime + ", action Type " + actionType);
@@ -237,7 +251,7 @@ public class SparkBootstrapCommitActionExecutor<T extends HoodieRecordPayload<T>
 
     // Finalize write
     finalizeWrite(instantTime, stats, result);
-
+    syncTableMetadata();
     // add in extra metadata
     if (extraMetadata.isPresent()) {
       extraMetadata.get().forEach(metadata::addMetadata);
@@ -291,7 +305,7 @@ public class SparkBootstrapCommitActionExecutor<T extends HoodieRecordPayload<T>
                                                        HoodieFileStatus srcFileStatus, KeyGeneratorInterface keyGenerator) {
 
     Path sourceFilePath = FileStatusUtils.toPath(srcFileStatus.getPath());
-    HoodieBootstrapHandle bootstrapHandle = new HoodieBootstrapHandle(config, HoodieTimeline.METADATA_BOOTSTRAP_INSTANT_TS,
+    HoodieBootstrapHandle<?,?,?,?> bootstrapHandle = new HoodieBootstrapHandle(config, HoodieTimeline.METADATA_BOOTSTRAP_INSTANT_TS,
         table, partitionPath, FSUtils.createNewFileIdPfx(), table.getTaskContextSupplier());
     Schema avroSchema = null;
     try {
@@ -329,7 +343,8 @@ public class SparkBootstrapCommitActionExecutor<T extends HoodieRecordPayload<T>
     } catch (IOException e) {
       throw new HoodieIOException(e.getMessage(), e);
     }
-    BootstrapWriteStatus writeStatus = (BootstrapWriteStatus)bootstrapHandle.getWriteStatus();
+
+    BootstrapWriteStatus writeStatus = (BootstrapWriteStatus) bootstrapHandle.writeStatuses().get(0);
     BootstrapFileMapping bootstrapFileMapping = new BootstrapFileMapping(
         config.getBootstrapSourceBasePath(), srcPartitionPath, partitionPath,
         srcFileStatus, writeStatus.getFileId());

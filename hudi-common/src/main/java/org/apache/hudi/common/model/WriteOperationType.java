@@ -42,8 +42,12 @@ public enum WriteOperationType {
   INSERT_OVERWRITE("insert_overwrite"),
   // cluster
   CLUSTER("cluster"),
+  // delete partition
+  DELETE_PARTITION("delete_partition"),
   // insert overwrite with dynamic partitioning
   INSERT_OVERWRITE_TABLE("insert_overwrite_table"),
+  // compact
+  COMPACT("compact"),
   // used for old version
   UNKNOWN("unknown");
 
@@ -74,8 +78,16 @@ public enum WriteOperationType {
         return DELETE;
       case "insert_overwrite":
         return INSERT_OVERWRITE;
+      case "delete_partition":
+        return DELETE_PARTITION;
       case "insert_overwrite_table":
         return INSERT_OVERWRITE_TABLE;
+      case "cluster":
+        return CLUSTER;
+      case "compact":
+        return COMPACT;
+      case "unknown":
+        return UNKNOWN;
       default:
         throw new HoodieException("Invalid value of Type.");
     }
@@ -91,5 +103,9 @@ public enum WriteOperationType {
 
   public static boolean isChangingRecords(WriteOperationType operationType) {
     return operationType == UPSERT || operationType == UPSERT_PREPPED || operationType == DELETE;
+  }
+
+  public static boolean isOverwrite(WriteOperationType operationType) {
+    return operationType == INSERT_OVERWRITE || operationType == INSERT_OVERWRITE_TABLE;
   }
 }

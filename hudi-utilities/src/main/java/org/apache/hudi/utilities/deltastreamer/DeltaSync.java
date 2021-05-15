@@ -20,6 +20,7 @@ package org.apache.hudi.utilities.deltastreamer;
 
 import org.apache.hudi.DataSourceUtils;
 import org.apache.hudi.HoodieSparkUtils;
+import org.apache.hudi.HoodieWriterUtils;
 import org.apache.hudi.avro.HoodieAvroUtils;
 import org.apache.hudi.client.SparkRDDWriteClient;
 import org.apache.hudi.client.WriteStatus;
@@ -31,7 +32,6 @@ import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordPayload;
-import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
@@ -41,6 +41,7 @@ import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieCompactionConfig;
+import org.apache.hudi.config.HoodiePayloadConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.hive.HiveSyncConfig;
@@ -222,8 +223,7 @@ public class DeltaSync implements Serializable {
    */
   public void refreshTimeline() throws IOException {
     if (fs.exists(new Path(cfg.targetBasePath))) {
-      HoodieTableMetaClient meta = new HoodieTableMetaClient(new Configuration(fs.getConf()), cfg.targetBasePath,
-          cfg.payloadClassName);
+      HoodieTableMetaClient meta = HoodieTableMetaClient.builder().setConf(new Configuration(fs.getConf())).setBasePath(cfg.targetBasePath).setPayloadClassName(cfg.payloadClassName).build();
       switch (meta.getTableType()) {
         case COPY_ON_WRITE:
           this.commitTimelineOpt = Option.of(meta.getActiveTimeline().getCommitTimeline().filterCompletedInstants());
@@ -236,8 +236,17 @@ public class DeltaSync implements Serializable {
       }
     } else {
       this.commitTimelineOpt = Option.empty();
-      HoodieTableMetaClient.initTableType(new Configuration(jssc.hadoopConfiguration()), cfg.targetBasePath,
-          HoodieTableType.valueOf(cfg.tableType), cfg.targetTableName, "archived", cfg.payloadClassName, cfg.baseFileFormat);
+      String partitionColumns = HoodieWriterUtils.getPartitionColumns(keyGenerator);
+
+      HoodieTableMetaClient.withPropertyBuilder()
+          .setTableType(cfg.tableType)
+          .setTableName(cfg.targetTableName)
+          .setArchiveLogFolder("archived")
+          .setPayloadClassName(cfg.payloadClassName)
+          .setBaseFileFormat(cfg.baseFileFormat)
+          .setPartitionColumns(partitionColumns)
+          .initTable(new Configuration(jssc.hadoopConfiguration()),
+            cfg.targetBasePath);
     }
   }
 
@@ -295,7 +304,9 @@ public class DeltaSync implements Serializable {
     // Retrieve the previous round checkpoints, if any
     Option<String> resumeCheckpointStr = Option.empty();
     if (commitTimelineOpt.isPresent()) {
-      Option<HoodieInstant> lastCommit = commitTimelineOpt.get().lastInstant();
+      // TODO: now not support replace action HUDI-1500
+      Option<HoodieInstant> lastCommit = commitTimelineOpt.get()
+          .filter(instant -> !instant.getAction().equals(HoodieTimeline.REPLACE_COMMIT_ACTION)).lastInstant();
       if (lastCommit.isPresent()) {
         HoodieCommitMetadata commitMetadata = HoodieCommitMetadata
             .fromBytes(commitTimelineOpt.get().getInstantDetails(lastCommit.get()).get(), HoodieCommitMetadata.class);
@@ -306,7 +317,10 @@ public class DeltaSync implements Serializable {
           if (!commitMetadata.getMetadata(CHECKPOINT_KEY).isEmpty()) {
             resumeCheckpointStr = Option.of(commitMetadata.getMetadata(CHECKPOINT_KEY));
           }
-        }  else if (HoodieTimeline.compareTimestamps(HoodieTimeline.FULL_BOOTSTRAP_INSTANT_TS,
+        } else if (commitMetadata.getOperationType() == WriteOperationType.CLUSTER) {
+          // incase of CLUSTER commit, no checkpoint will be available in metadata.
+          resumeCheckpointStr = Option.empty();
+        } else if (HoodieTimeline.compareTimestamps(HoodieTimeline.FULL_BOOTSTRAP_INSTANT_TS,
             HoodieTimeline.LESSER_THAN, lastCommit.get().getTimestamp())) {
           throw new HoodieDeltaStreamerException(
               "Unable to find previous checkpoint. Please double check if this table "
@@ -316,8 +330,15 @@ public class DeltaSync implements Serializable {
         }
       }
     } else {
-      HoodieTableMetaClient.initTableType(new Configuration(jssc.hadoopConfiguration()), cfg.targetBasePath,
-          HoodieTableType.valueOf(cfg.tableType), cfg.targetTableName, "archived", cfg.payloadClassName, cfg.baseFileFormat);
+      String partitionColumns = HoodieWriterUtils.getPartitionColumns(keyGenerator);
+      HoodieTableMetaClient.withPropertyBuilder()
+          .setTableType(cfg.tableType)
+          .setTableName(cfg.targetTableName)
+          .setArchiveLogFolder("archived")
+          .setPayloadClassName(cfg.payloadClassName)
+          .setBaseFileFormat(cfg.baseFileFormat)
+          .setPartitionColumns(partitionColumns)
+          .initTable(new Configuration(jssc.hadoopConfiguration()), cfg.targetBasePath);
     }
 
     if (!resumeCheckpointStr.isPresent() && cfg.checkpoint != null) {
@@ -370,7 +391,7 @@ public class DeltaSync implements Serializable {
 
     if (Objects.equals(checkpointStr, resumeCheckpointStr.orElse(null))) {
       LOG.info("No new data, source checkpoint has not changed. Nothing to commit. Old checkpoint=("
-          + resumeCheckpointStr + "). New Checkpoint=(" + checkpointStr + ")");
+           + resumeCheckpointStr + "). New Checkpoint=(" + checkpointStr + ")");
       return null;
     }
 
@@ -593,7 +614,7 @@ public class DeltaSync implements Serializable {
       // Close Write client.
       writeClient.close();
     }
-    writeClient = new SparkRDDWriteClient<>(new HoodieSparkEngineContext(jssc), hoodieCfg, true, embeddedTimelineService);
+    writeClient = new SparkRDDWriteClient<>(new HoodieSparkEngineContext(jssc), hoodieCfg, embeddedTimelineService);
     onInitializingHoodieWriteClient.apply(writeClient);
   }
 
@@ -619,6 +640,8 @@ public class DeltaSync implements Serializable {
             .withCompactionConfig(HoodieCompactionConfig.newBuilder().withPayloadClass(cfg.payloadClassName)
                 // Inline compaction is disabled for continuous mode. otherwise enabled for MOR
                 .withInlineCompaction(cfg.isInlineCompactionEnabled()).build())
+            .withPayloadConfig(HoodiePayloadConfig.newBuilder().withPayloadOrderingField(cfg.sourceOrderingField)
+                .build())
             .forTable(cfg.targetTableName)
             .withAutoCommit(autoCommit).withProps(props);
 
@@ -633,7 +656,7 @@ public class DeltaSync implements Serializable {
     }
 
     // Validate what deltastreamer assumes of write-config to be really safe
-    ValidationUtils.checkArgument(config.isInlineCompaction() == cfg.isInlineCompactionEnabled(),
+    ValidationUtils.checkArgument(config.inlineCompactionEnabled() == cfg.isInlineCompactionEnabled(),
         String.format("%s should be set to %s", INLINE_COMPACT_PROP, cfg.isInlineCompactionEnabled()));
     ValidationUtils.checkArgument(!config.shouldAutoCommit(),
         String.format("%s should be set to %s", HOODIE_AUTO_COMMIT_PROP, autoCommit));
@@ -671,7 +694,9 @@ public class DeltaSync implements Serializable {
         schemas.add(targetSchema);
       }
 
-      LOG.info("Registering Schema :" + schemas);
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Registering Schema: " + schemas);
+      }
       jssc.sc().getConf().registerAvroSchemas(JavaConversions.asScalaBuffer(schemas).toList());
     }
   }

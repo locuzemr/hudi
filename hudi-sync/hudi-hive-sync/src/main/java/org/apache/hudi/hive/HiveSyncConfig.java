@@ -18,6 +18,8 @@
 
 package org.apache.hudi.hive;
 
+import org.apache.hudi.common.config.HoodieMetadataConfig;
+
 import com.beust.jcommander.Parameter;
 
 import java.io.Serializable;
@@ -74,8 +76,23 @@ public class HiveSyncConfig implements Serializable {
   @Parameter(names = {"--auto-create-database"}, description = "Auto create hive database")
   public Boolean autoCreateDatabase = true;
 
+  @Parameter(names = {"--ignore-exceptions"}, description = "Ignore hive exceptions")
+  public Boolean ignoreExceptions = false;
+
   @Parameter(names = {"--skip-ro-suffix"}, description = "Skip the `_ro` suffix for Read optimized table, when registering")
   public Boolean skipROSuffix = false;
+
+  @Parameter(names = {"--use-file-listing-from-metadata"}, description = "Fetch file listing from Hudi's metadata")
+  public Boolean useFileListingFromMetadata = HoodieMetadataConfig.DEFAULT_METADATA_ENABLE_FOR_READERS;
+
+  @Parameter(names = {"--verify-metadata-file-listing"}, description = "Verify file listing from Hudi's metadata against file system")
+  public Boolean verifyMetadataFileListing = HoodieMetadataConfig.DEFAULT_METADATA_VALIDATE;
+
+  @Parameter(names = {"--table-properties"}, description = "Table properties to hive table")
+  public String tableProperties;
+
+  @Parameter(names = {"--serde-properties"}, description = "Serde properties to hive table")
+  public String serdeProperties;
 
   @Parameter(names = {"--help", "-h"}, help = true)
   public Boolean help = false;
@@ -83,6 +100,9 @@ public class HiveSyncConfig implements Serializable {
   @Parameter(names = {"--support-timestamp"}, description = "'INT64' with original type TIMESTAMP_MICROS is converted to hive 'timestamp' type."
       + "Disabled by default for backward compatibility.")
   public Boolean supportTimestamp = false;
+
+  @Parameter(names = {"--decode-partition"}, description = "Decode the partition value if the partition has encoded during writing")
+  public Boolean decodePartition = false;
 
   public static HiveSyncConfig copy(HiveSyncConfig cfg) {
     HiveSyncConfig newConfig = new HiveSyncConfig();
@@ -96,16 +116,40 @@ public class HiveSyncConfig implements Serializable {
     newConfig.jdbcUrl = cfg.jdbcUrl;
     newConfig.tableName = cfg.tableName;
     newConfig.usePreApacheInputFormat = cfg.usePreApacheInputFormat;
+    newConfig.useFileListingFromMetadata = cfg.useFileListingFromMetadata;
+    newConfig.verifyMetadataFileListing = cfg.verifyMetadataFileListing;
     newConfig.supportTimestamp = cfg.supportTimestamp;
+    newConfig.decodePartition = cfg.decodePartition;
+    newConfig.tableProperties = cfg.tableProperties;
+    newConfig.serdeProperties = cfg.serdeProperties;
     return newConfig;
   }
 
   @Override
   public String toString() {
-    return "HiveSyncConfig{databaseName='" + databaseName + '\'' + ", tableName='" + tableName + '\''
-        + ", hiveUser='" + hiveUser + '\'' + ", hivePass='" + hivePass + '\'' + ", jdbcUrl='" + jdbcUrl + '\''
-        + ", basePath='" + basePath + '\'' + ", partitionFields=" + partitionFields + ", partitionValueExtractorClass='"
-        + partitionValueExtractorClass + '\'' + ", assumeDatePartitioning=" + assumeDatePartitioning + '\'' + ", supportTimestamp='" + supportTimestamp + '\''
-        + ", usePreApacheInputFormat=" + usePreApacheInputFormat + ", useJdbc=" + useJdbc + ", help=" + help + '}';
+    return "HiveSyncConfig{"
+      + "databaseName='" + databaseName + '\''
+      + ", tableName='" + tableName + '\''
+      + ", baseFileFormat='" + baseFileFormat + '\''
+      + ", hiveUser='" + hiveUser + '\''
+      + ", hivePass='" + hivePass + '\''
+      + ", jdbcUrl='" + jdbcUrl + '\''
+      + ", basePath='" + basePath + '\''
+      + ", partitionFields=" + partitionFields
+      + ", partitionValueExtractorClass='" + partitionValueExtractorClass + '\''
+      + ", assumeDatePartitioning=" + assumeDatePartitioning
+      + ", usePreApacheInputFormat=" + usePreApacheInputFormat
+      + ", useJdbc=" + useJdbc
+      + ", autoCreateDatabase=" + autoCreateDatabase
+      + ", ignoreExceptions=" + ignoreExceptions
+      + ", skipROSuffix=" + skipROSuffix
+      + ", useFileListingFromMetadata=" + useFileListingFromMetadata
+      + ", verifyMetadataFileListing=" + verifyMetadataFileListing
+      + ", tableProperties='" + tableProperties + '\''
+      + ", serdeProperties='" + serdeProperties + '\''
+      + ", help=" + help
+      + ", supportTimestamp=" + supportTimestamp
+      + ", decodePartition=" + decodePartition
+      + '}';
   }
 }

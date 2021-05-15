@@ -142,7 +142,9 @@ Start the Hudi Docker demo:
 docker/setup_demo.sh
 ```
 
-NOTE: We need to make a couple of environment changes for Hive 2.x support. This will be fixed once Hudi moves to Spark 3.x
+NOTE: We need to make a couple of environment changes for Hive 2.x support. This will be fixed once Hudi moves to Spark 3.x.
+Execute below if you are using Hudi query node in your dag. If not, below section is not required. 
+Also, for longer running tests, go to next section. 
 
 ```
 docker exec -it adhoc-2 bash
@@ -175,7 +177,7 @@ cd /opt
 Copy the integration tests jar into the docker container
 
 ```
-docker cp packaging/hudi-integ-test-bundle/target/hudi-integ-test-bundle-0.6.1-SNAPSHOT.jar adhoc-2:/opt
+docker cp packaging/hudi-integ-test-bundle/target/hudi-integ-test-bundle-0.8.0-SNAPSHOT.jar adhoc-2:/opt
 ```
 
 ```
@@ -213,8 +215,8 @@ spark-submit \
 --conf spark.yarn.max.executor.failures=10 \
 --conf spark.sql.catalogImplementation=hive \
 --class org.apache.hudi.integ.testsuite.HoodieTestSuiteJob \
-/opt/hudi-integ-test-bundle-0.6.1-SNAPSHOT.jar \
---source-ordering-field timestamp \
+/opt/hudi-integ-test-bundle-0.8.0-SNAPSHOT.jar \
+--source-ordering-field test_suite_source_ordering_field \
 --use-deltastreamer \
 --target-base-path /user/hive/warehouse/hudi-integ-test-suite/output \
 --input-base-path /user/hive/warehouse/hudi-integ-test-suite/input \
@@ -252,8 +254,8 @@ spark-submit \
 --conf spark.yarn.max.executor.failures=10 \
 --conf spark.sql.catalogImplementation=hive \
 --class org.apache.hudi.integ.testsuite.HoodieTestSuiteJob \
-/opt/hudi-integ-test-bundle-0.6.1-SNAPSHOT.jar \
---source-ordering-field timestamp \
+/opt/hudi-integ-test-bundle-0.8.0-SNAPSHOT.jar \
+--source-ordering-field test_suite_source_ordering_field \
 --use-deltastreamer \
 --target-base-path /user/hive/warehouse/hudi-integ-test-suite/output \
 --input-base-path /user/hive/warehouse/hudi-integ-test-suite/input \
@@ -267,3 +269,222 @@ spark-submit \
 --table-type MERGE_ON_READ \
 --compact-scheduling-minshare 1
 ``` 
+
+## Running long running test suite in Local Docker environment
+
+For long running test suite, validation has to be done differently. Idea is to run same dag in a repeated manner for 
+N iterations. Hence "ValidateDatasetNode" is introduced which will read entire input data and compare it with hudi 
+contents both via spark datasource and hive table via spark sql engine. Hive validation is configurable. 
+
+If you have "ValidateDatasetNode" in your dag, do not replace hive jars as instructed above. Spark sql engine does not 
+go well w/ hive2* jars. So, after running docker setup, follow the below steps. 
+```
+docker cp packaging/hudi-integ-test-bundle/target/hudi-integ-test-bundle-0.8.0-SNAPSHOT.jar adhoc-2:/opt/
+docker cp demo/config/test-suite/test.properties adhoc-2:/opt/
+```
+Also copy your dag of interest to adhoc-2:/opt/
+```
+docker cp demo/config/test-suite/complex-dag-cow.yaml adhoc-2:/opt/
+```
+
+For repeated runs, two additional configs need to be set. "dag_rounds" and "dag_intermittent_delay_mins". 
+This means that your dag will be repeated for N times w/ a delay of Y mins between each round. Note: complex-dag-cow.yaml
+already has all these configs set. So no changes required just to try it out. 
+
+Also, ValidateDatasetNode can be configured in two ways. Either with "delete_input_data" set to true or without 
+setting the config. When "delete_input_data" is set for ValidateDatasetNode, once validation is complete, entire input 
+data will be deleted. So, suggestion is to use this ValidateDatasetNode as the last node in the dag with "delete_input_data". 
+
+Example dag: 
+```
+     Insert
+     Upsert
+     ValidateDatasetNode with delete_input_data = true
+```
+
+If above dag is run with "dag_rounds" = 10 and "dag_intermittent_delay_mins" = 10, then this dag will run for 10 times 
+with 10 mins delay between every run. At the end of every run, records written as part of this round will be validated. 
+At the end of each validation, all contents of input are deleted.   
+To illustrate each round 
+```
+Round1: 
+    insert => inputPath/batch1
+    upsert -> inputPath/batch2
+    Validate with delete_input_data = true
+              Validates contents from batch1 and batch2 are in hudi and ensures Row equality
+              Since "delete_input_data" is set, deletes contents from batch1 and batch2.
+Round2:    
+    insert => inputPath/batch3
+    upsert -> inputPath/batch4
+    Validate with delete_input_data = true
+              Validates contents from batch3 and batch4 are in hudi and ensures Row equality
+              Since "delete_input_data" is set, deletes contents from batch3 and batch4.
+Round3:    
+    insert => inputPath/batch5
+    upsert -> inputPath/batch6
+    Validate with delete_input_data = true
+              Validates contents from batch5 and batch6 are in hudi and ensures Row equality
+              Since "delete_input_data" is set, deletes contents from batch5 and batch6.   
+.
+.
+```
+If you wish to do a cumulative validation, do not set delete_input_data in ValidateDatasetNode. But remember that this 
+may not scale beyond certain point since input data as well as hudi content's keeps occupying the disk and grows for 
+every cycle.
+
+Lets see an example where you don't set "delete_input_data" as part of Validation. 
+```
+     Insert
+     Upsert
+     ValidateDatasetNode 
+```
+Here is the illustration of each round
+```
+Round1: 
+    insert => inputPath/batch1
+    upsert -> inputPath/batch2
+    Validate: validates contents from batch1 and batch2 are in hudi and ensures Row equality
+Round2:    
+    insert => inputPath/batch3
+    upsert -> inputPath/batch4
+    Validate: validates contents from batch1 to batch4 are in hudi and ensures Row equality
+Round3:    
+    insert => inputPath/batch5
+    upsert -> inputPath/batch6
+    Validate: validates contents from batch1 and batch6 are in hudi and ensures Row equality
+.
+.
+```
+
+You could also have validations in the middle of your dag and not set the "delete_input_data". But set it only in the 
+last node in the dag.
+```
+Round1: 
+    insert => inputPath/batch1
+    upsert -> inputPath/batch2
+    Validate: validates contents from batch1 and batch2 are in hudi and ensures Row equality
+    insert => inputPath/batch3
+    upsert -> inputPath/batch4
+    Validate with delete_input_data = true
+             Validates contents from batch1 to batch4 are in hudi and ensures Row equality
+             since "delete_input_data" is set to true, this node deletes contents from batch1 and batch4.
+Round2: 
+    insert => inputPath/batch5
+    upsert -> inputPath/batch6
+    Validate: validates contents from batch5 and batch6 are in hudi and ensures Row equality
+    insert => inputPath/batch7
+    upsert -> inputPath/batch8
+    Validate: validates contents from batch5 to batch8 are in hudi and ensures Row equality
+             since "delete_input_data" is set to true, this node deletes contents from batch5 to batch8.
+Round3: 
+    insert => inputPath/batch9
+    upsert -> inputPath/batch10
+    Validate: validates contents from batch9 and batch10 are in hudi and ensures Row equality
+    insert => inputPath/batch11
+    upsert -> inputPath/batch12
+     Validate with delete_input_data = true
+             Validates contents from batch9 to batch12 are in hudi and ensures Row equality
+             Set "delete_input_data" to true. so this node deletes contents from batch9 to batch12. 
+.
+.
+```
+Above dag was just an example for illustration purposes. But you can make it complex as per your needs.
+```
+    Insert
+    Upsert
+    Delete
+    Validate w/o deleting
+    Insert
+    Rollback
+    Validate w/o deleting
+    Upsert
+    Validate w/ deletion
+```
+
+Once you have copied the jar, test.properties and your dag to adhoc-2:/opt/, you can run the following command to execute 
+the test suite job. 
+```
+docker exec -it adhoc-2 /bin/bash
+```
+Sample COW command
+```
+spark-submit \
+--packages org.apache.spark:spark-avro_2.11:2.4.0 \
+--conf spark.task.cpus=1 \
+--conf spark.executor.cores=1 \
+--conf spark.task.maxFailures=100 \
+--conf spark.memory.fraction=0.4  \
+--conf spark.rdd.compress=true  \
+--conf spark.kryoserializer.buffer.max=2000m \
+--conf spark.serializer=org.apache.spark.serializer.KryoSerializer \
+--conf spark.memory.storageFraction=0.1 \
+--conf spark.shuffle.service.enabled=true  \
+--conf spark.sql.hive.convertMetastoreParquet=false  \
+--conf spark.driver.maxResultSize=12g \
+--conf spark.executor.heartbeatInterval=120s \
+--conf spark.network.timeout=600s \
+--conf spark.yarn.max.executor.failures=10 \
+--conf spark.sql.catalogImplementation=hive \
+--conf spark.driver.extraClassPath=/var/demo/jars/* \
+--conf spark.executor.extraClassPath=/var/demo/jars/* \
+--class org.apache.hudi.integ.testsuite.HoodieTestSuiteJob \
+/opt/hudi-integ-test-bundle-0.8.0-SNAPSHOT.jar \
+--source-ordering-field test_suite_source_ordering_field \
+--use-deltastreamer \
+--target-base-path /user/hive/warehouse/hudi-integ-test-suite/output \
+--input-base-path /user/hive/warehouse/hudi-integ-test-suite/input \
+--target-table table1 \
+--props test.properties \
+--schemaprovider-class org.apache.hudi.integ.testsuite.schema.TestSuiteFileBasedSchemaProvider \
+--source-class org.apache.hudi.utilities.sources.AvroDFSSource \
+--input-file-size 125829120 \
+--workload-yaml-path file:/opt/complex-dag-cow.yaml \
+--workload-generator-classname org.apache.hudi.integ.testsuite.dag.WorkflowDagGenerator \
+--table-type COPY_ON_WRITE \
+--compact-scheduling-minshare 1 \
+--clean-input
+--clean-output
+```
+
+Few ready to use dags are available under docker/demo/config/test-suite/ that could give you an idea for long running 
+dags.
+```
+complex-dag-cow.yaml: simple 1 round dag for COW table.
+complex-dag-mor.yaml: simple 1 round dag for MOR table.
+cow-clustering-example.yaml : dag with 3 rounds, in which inline clustering will trigger during 2nd iteration. 
+cow-long-running-example.yaml : long running dag with 50 iterations. only 1 partition is used. 
+cow-long-running-multi-partitions.yaml: long running dag wit 50 iterations with multiple partitions.
+```
+
+To run test suite jobs for MOR table, pretty much any of these dags can be used as is. Only change is with the 
+spark-shell commnad, you need to fix the table type. 
+```
+--table-type MERGE_ON_READ
+```
+But if you had to switch from one table type to other, ensure you clean up all test paths explicitly before switching to
+a different table type.
+```
+hdfs dfs -rm -r /user/hive/warehouse/hudi-integ-test-suite/output/
+hdfs dfs -rm -r /user/hive/warehouse/hudi-integ-test-suite/input/
+```
+
+As of now, "ValidateDatasetNode" uses spark data source and hive tables for comparison. Hence COW and real time view in 
+MOR can be tested.
+              
+To run test suite jobs for validating all versions of schema, a DAG with insert, upsert nodes can be supplied with every version of schema to be evaluated, with "--saferSchemaEvolution" flag indicating the job is for schema validations.  First run of the job will populate the dataset with data files with every version of schema and perform an upsert operation for verifying schema evolution. 
+
+Second and subsequent runs will verify that the data can be inserted with latest version of schema and perform an upsert operation to evolve all older version of schema (created by older run) to the latest version of schema.
+
+Sample DAG:
+```
+rollback with num_rollbacks = 2
+insert with schema_version = <version>
+....
+upsert with fraction_upsert_per_file = 0.5
+```
+
+Spark submit with the flag:
+```
+--saferSchemaEvolution
+```
+

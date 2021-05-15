@@ -17,11 +17,17 @@
 
 package org.apache.hudi
 
+import scala.collection.JavaConverters._
 import org.apache.hudi.DataSourceWriteOptions._
 import org.apache.hudi.common.config.TypedProperties
 
 import scala.collection.JavaConversions.mapAsJavaMap
 import scala.collection.JavaConverters.mapAsScalaMapConverter
+import org.apache.hudi.common.config.HoodieMetadataConfig.DEFAULT_METADATA_ENABLE
+import org.apache.hudi.common.config.HoodieMetadataConfig.DEFAULT_METADATA_VALIDATE
+import org.apache.hudi.common.config.HoodieMetadataConfig.METADATA_ENABLE_PROP
+import org.apache.hudi.common.config.HoodieMetadataConfig.METADATA_VALIDATE_PROP
+import org.apache.hudi.keygen.{BaseKeyGenerator, CustomAvroKeyGenerator, CustomKeyGenerator, KeyGenerator}
 
 /**
  * WriterUtils to assist in write path in Datasource and tests.
@@ -46,6 +52,8 @@ object HoodieWriterUtils {
       RECORDKEY_FIELD_OPT_KEY -> DEFAULT_RECORDKEY_FIELD_OPT_VAL,
       PARTITIONPATH_FIELD_OPT_KEY -> DEFAULT_PARTITIONPATH_FIELD_OPT_VAL,
       KEYGENERATOR_CLASS_OPT_KEY -> DEFAULT_KEYGENERATOR_CLASS_OPT_VAL,
+      METADATA_ENABLE_PROP -> DEFAULT_METADATA_ENABLE.toString,
+      METADATA_VALIDATE_PROP -> DEFAULT_METADATA_VALIDATE.toString,
       COMMIT_METADATA_KEYPREFIX_OPT_KEY -> DEFAULT_COMMIT_METADATA_KEYPREFIX_OPT_VAL,
       INSERT_DROP_DUPS_OPT_KEY -> DEFAULT_INSERT_DROP_DUPS_OPT_VAL,
       STREAMING_RETRY_CNT_OPT_KEY -> DEFAULT_STREAMING_RETRY_CNT_OPT_VAL,
@@ -73,5 +81,33 @@ object HoodieWriterUtils {
     val props = new TypedProperties()
     params.foreach(kv => props.setProperty(kv._1, kv._2))
     props
+  }
+
+  /**
+   * Get the partition columns to stored to hoodie.properties.
+   * @param parameters
+   * @return
+   */
+  def getPartitionColumns(parameters: Map[String, String]): String = {
+    val props = new TypedProperties()
+    props.putAll(parameters.asJava)
+    val keyGen = DataSourceUtils.createKeyGenerator(props)
+    getPartitionColumns(keyGen)
+  }
+
+  def getPartitionColumns(keyGen: KeyGenerator): String = {
+    keyGen match {
+      // For CustomKeyGenerator and CustomAvroKeyGenerator, the partition path filed format
+      // is: "field_name: field_type", we extract the field_name from the partition path field.
+      case c: BaseKeyGenerator
+        if c.isInstanceOf[CustomKeyGenerator] || c.isInstanceOf[CustomAvroKeyGenerator] =>
+          c.getPartitionPathFields.asScala.map(pathField =>
+            pathField.split(CustomAvroKeyGenerator.SPLIT_REGEX)
+                .headOption.getOrElse(s"Illegal partition path field format: '$pathField' for ${c.getClass.getSimpleName}"))
+            .mkString(",")
+
+      case b: BaseKeyGenerator => b.getPartitionPathFields.asScala.mkString(",")
+      case _=> null
+    }
   }
 }

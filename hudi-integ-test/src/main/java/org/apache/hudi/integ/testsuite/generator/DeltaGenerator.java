@@ -28,7 +28,6 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.StreamSupport;
@@ -58,7 +57,6 @@ import org.apache.spark.storage.StorageLevel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-
 import scala.Tuple2;
 
 /**
@@ -77,7 +75,7 @@ public class DeltaGenerator implements Serializable {
   private int batchId;
 
   public DeltaGenerator(DFSDeltaConfig deltaOutputConfig, JavaSparkContext jsc, SparkSession sparkSession,
-                        String schemaStr, BuiltinKeyGenerator keyGenerator) {
+      String schemaStr, BuiltinKeyGenerator keyGenerator) {
     this.deltaOutputConfig = deltaOutputConfig;
     this.jsc = jsc;
     this.sparkSession = sparkSession;
@@ -113,7 +111,7 @@ public class DeltaGenerator implements Serializable {
 
   public JavaRDD<GenericRecord> generateInserts(Config operation) {
     int numPartitions = operation.getNumInsertPartitions();
-    long recordsPerPartition = operation.getNumRecordsInsert() / numPartitions;
+    long recordsPerPartition = operation.getNumRecordsInsert();
     int minPayloadSize = operation.getRecordSize();
     int startPartition = operation.getStartPartition();
 
@@ -124,7 +122,7 @@ public class DeltaGenerator implements Serializable {
     JavaRDD<GenericRecord> inputBatch = jsc.parallelize(partitionIndexes, numPartitions)
         .mapPartitionsWithIndex((index, p) -> {
           return new LazyRecordGeneratorIterator(new FlexibleSchemaRecordGenerationIterator(recordsPerPartition,
-            minPayloadSize, schemaStr, partitionPathFieldNames, (Integer)index));
+              minPayloadSize, schemaStr, partitionPathFieldNames, numPartitions, startPartition));
         }, true);
 
     if (deltaOutputConfig.getInputParallelism() < numPartitions) {
@@ -167,7 +165,6 @@ public class DeltaGenerator implements Serializable {
         log.info("Repartitioning records into " + numPartition + " partitions for updates");
         adjustedRDD = adjustedRDD.repartition(numPartition);
         log.info("Repartitioning records done for updates");
-
         UpdateConverter converter = new UpdateConverter(schemaStr, config.getRecordSize(),
             partitionPathFieldNames, recordRowKeyFieldNames);
         JavaRDD<GenericRecord> updates = converter.convert(adjustedRDD);
@@ -219,7 +216,6 @@ public class DeltaGenerator implements Serializable {
       throw new IllegalArgumentException("Other formats are not supported at the moment");
     }
   }
-
 
   public Map<Integer, Long> getPartitionToCountMap(JavaRDD<GenericRecord> records) {
     // Requires us to keep the partitioner the same

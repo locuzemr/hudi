@@ -19,13 +19,15 @@
 package org.apache.hudi.table;
 
 import org.apache.hudi.avro.model.HoodieCleanMetadata;
+import org.apache.hudi.avro.model.HoodieCleanerPlan;
+import org.apache.hudi.avro.model.HoodieClusteringPlan;
 import org.apache.hudi.avro.model.HoodieCompactionPlan;
 import org.apache.hudi.avro.model.HoodieRestoreMetadata;
 import org.apache.hudi.avro.model.HoodieRollbackMetadata;
 import org.apache.hudi.avro.model.HoodieSavepointMetadata;
 import org.apache.hudi.client.WriteStatus;
-import org.apache.hudi.client.common.HoodieEngineContext;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
+import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.model.HoodieBaseFile;
 import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
@@ -44,12 +46,16 @@ import org.apache.hudi.table.action.HoodieWriteMetadata;
 import org.apache.hudi.table.action.bootstrap.HoodieBootstrapWriteMetadata;
 import org.apache.hudi.table.action.bootstrap.SparkBootstrapCommitActionExecutor;
 import org.apache.hudi.table.action.clean.SparkCleanActionExecutor;
-import org.apache.hudi.table.action.commit.SparkInsertOverwriteCommitActionExecutor;
-import org.apache.hudi.table.action.commit.SparkInsertOverwriteTableCommitActionExecutor;
+import org.apache.hudi.table.action.clean.SparkCleanPlanActionExecutor;
+import org.apache.hudi.table.action.cluster.SparkClusteringPlanActionExecutor;
+import org.apache.hudi.table.action.cluster.SparkExecuteClusteringCommitActionExecutor;
 import org.apache.hudi.table.action.commit.SparkBulkInsertCommitActionExecutor;
 import org.apache.hudi.table.action.commit.SparkBulkInsertPreppedCommitActionExecutor;
 import org.apache.hudi.table.action.commit.SparkDeleteCommitActionExecutor;
+import org.apache.hudi.table.action.commit.SparkDeletePartitionCommitActionExecutor;
 import org.apache.hudi.table.action.commit.SparkInsertCommitActionExecutor;
+import org.apache.hudi.table.action.commit.SparkInsertOverwriteCommitActionExecutor;
+import org.apache.hudi.table.action.commit.SparkInsertOverwriteTableCommitActionExecutor;
 import org.apache.hudi.table.action.commit.SparkInsertPreppedCommitActionExecutor;
 import org.apache.hudi.table.action.commit.SparkMergeHelper;
 import org.apache.hudi.table.action.commit.SparkUpsertCommitActionExecutor;
@@ -57,7 +63,6 @@ import org.apache.hudi.table.action.commit.SparkUpsertPreppedCommitActionExecuto
 import org.apache.hudi.table.action.restore.SparkCopyOnWriteRestoreActionExecutor;
 import org.apache.hudi.table.action.rollback.SparkCopyOnWriteRollbackActionExecutor;
 import org.apache.hudi.table.action.savepoint.SavepointActionExecutor;
-
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 import org.apache.spark.api.java.JavaRDD;
@@ -107,6 +112,11 @@ public class HoodieSparkCopyOnWriteTable<T extends HoodieRecordPayload> extends 
   }
 
   @Override
+  public HoodieWriteMetadata deletePartitions(HoodieEngineContext context, String instantTime, List<String> partitions) {
+    return new SparkDeletePartitionCommitActionExecutor(context, config, this, instantTime, partitions).execute();
+  }
+
+  @Override
   public HoodieWriteMetadata<JavaRDD<WriteStatus>> upsertPrepped(HoodieEngineContext context, String instantTime,
       JavaRDD<HoodieRecord<T>> preppedRecords) {
     return new SparkUpsertPreppedCommitActionExecutor<>((HoodieSparkEngineContext) context, config, this, instantTime, preppedRecords).execute();
@@ -146,6 +156,19 @@ public class HoodieSparkCopyOnWriteTable<T extends HoodieRecordPayload> extends 
   }
 
   @Override
+  public Option<HoodieClusteringPlan> scheduleClustering(HoodieEngineContext context,
+                                                         String instantTime,
+                                                         Option<Map<String, String>> extraMetadata) {
+    return new SparkClusteringPlanActionExecutor<>(context, config,this, instantTime, extraMetadata).execute();
+  }
+
+  @Override
+  public HoodieWriteMetadata<JavaRDD<WriteStatus>> cluster(HoodieEngineContext context,
+                                                           String clusteringInstantTime) {
+    return new SparkExecuteClusteringCommitActionExecutor<>(context, config, this, clusteringInstantTime).execute();
+  }
+
+  @Override
   public HoodieBootstrapWriteMetadata<JavaRDD<WriteStatus>> bootstrap(HoodieEngineContext context, Option<Map<String, String>> extraMetadata) {
     return new SparkBootstrapCommitActionExecutor((HoodieSparkEngineContext) context, config, this, extraMetadata).execute();
   }
@@ -155,6 +178,11 @@ public class HoodieSparkCopyOnWriteTable<T extends HoodieRecordPayload> extends 
     new SparkCopyOnWriteRestoreActionExecutor((HoodieSparkEngineContext) context, config, this, instantTime, HoodieTimeline.INIT_INSTANT_TS).execute();
   }
 
+  @Override
+  public Option<HoodieCleanerPlan> scheduleCleaning(HoodieEngineContext context, String instantTime, Option<Map<String, String>> extraMetadata) {
+    return new SparkCleanPlanActionExecutor<>(context, config,this, instantTime, extraMetadata).execute();
+  }
+
   public Iterator<List<WriteStatus>> handleUpdate(String instantTime, String partitionPath, String fileId,
       Map<String, HoodieRecord<T>> keyToNewRecords, HoodieBaseFile oldDataFile) throws IOException {
     // these are updates
@@ -162,7 +190,7 @@ public class HoodieSparkCopyOnWriteTable<T extends HoodieRecordPayload> extends 
     return handleUpdateInternal(upsertHandle, instantTime, fileId);
   }
 
-  protected Iterator<List<WriteStatus>> handleUpdateInternal(HoodieMergeHandle upsertHandle, String instantTime,
+  protected Iterator<List<WriteStatus>> handleUpdateInternal(HoodieMergeHandle<?,?,?,?> upsertHandle, String instantTime,
       String fileId) throws IOException {
     if (upsertHandle.getOldFilePath() == null) {
       throw new HoodieUpsertException(
@@ -172,11 +200,12 @@ public class HoodieSparkCopyOnWriteTable<T extends HoodieRecordPayload> extends 
     }
 
     // TODO(vc): This needs to be revisited
-    if (upsertHandle.getWriteStatus().getPartitionPath() == null) {
+    if (upsertHandle.getPartitionPath() == null) {
       LOG.info("Upsert Handle has partition path as null " + upsertHandle.getOldFilePath() + ", "
-          + upsertHandle.getWriteStatus());
+          + upsertHandle.writeStatuses());
     }
-    return Collections.singletonList(Collections.singletonList(upsertHandle.getWriteStatus())).iterator();
+
+    return Collections.singletonList(upsertHandle.writeStatuses()).iterator();
   }
 
   protected HoodieMergeHandle getUpdateHandle(String instantTime, String partitionPath, String fileId,
@@ -192,10 +221,10 @@ public class HoodieSparkCopyOnWriteTable<T extends HoodieRecordPayload> extends 
 
   public Iterator<List<WriteStatus>> handleInsert(String instantTime, String partitionPath, String fileId,
       Map<String, HoodieRecord<? extends HoodieRecordPayload>> recordMap) {
-    HoodieCreateHandle createHandle =
+    HoodieCreateHandle<?,?,?,?> createHandle =
         new HoodieCreateHandle(config, instantTime, this, partitionPath, fileId, recordMap, taskContextSupplier);
     createHandle.write();
-    return Collections.singletonList(Collections.singletonList(createHandle.close())).iterator();
+    return Collections.singletonList(createHandle.close()).iterator();
   }
 
   @Override

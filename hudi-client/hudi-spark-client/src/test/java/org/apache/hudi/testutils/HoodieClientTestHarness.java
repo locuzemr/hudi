@@ -17,24 +17,6 @@
 
 package org.apache.hudi.testutils;
 
-import org.apache.hudi.client.HoodieReadClient;
-import org.apache.hudi.client.SparkRDDWriteClient;
-import org.apache.hudi.client.SparkTaskContextSupplier;
-import org.apache.hudi.client.common.HoodieSparkEngineContext;
-import org.apache.hudi.common.fs.FSUtils;
-import org.apache.hudi.common.model.HoodieRecord;
-import org.apache.hudi.common.model.HoodieRecordLocation;
-import org.apache.hudi.common.table.HoodieTableMetaClient;
-import org.apache.hudi.common.table.timeline.HoodieTimeline;
-import org.apache.hudi.common.table.view.HoodieTableFileSystemView;
-import org.apache.hudi.common.testutils.HoodieCommonTestHarness;
-import org.apache.hudi.common.testutils.HoodieTestDataGenerator;
-import org.apache.hudi.common.testutils.HoodieTestUtils;
-import org.apache.hudi.common.testutils.minicluster.HdfsTestService;
-import org.apache.hudi.common.util.Option;
-import org.apache.hudi.common.util.collection.Pair;
-import org.apache.hudi.config.HoodieWriteConfig;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -42,12 +24,30 @@ import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hudi.client.HoodieReadClient;
+import org.apache.hudi.client.SparkRDDWriteClient;
+import org.apache.hudi.client.SparkTaskContextSupplier;
+import org.apache.hudi.client.common.HoodieSparkEngineContext;
+import org.apache.hudi.common.fs.FSUtils;
+import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.model.HoodieRecordLocation;
+import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.timeline.HoodieTimeline;
+import org.apache.hudi.common.table.view.HoodieTableFileSystemView;
+import org.apache.hudi.common.testutils.HoodieCommonTestHarness;
+import org.apache.hudi.common.testutils.HoodieTestUtils;
+import org.apache.hudi.common.testutils.minicluster.HdfsTestService;
+import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.collection.Pair;
+import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.table.WorkloadStat;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.sql.SQLContext;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.TestInfo;
 import scala.Tuple2;
@@ -72,7 +72,6 @@ public abstract class HoodieClientTestHarness extends HoodieCommonTestHarness im
   protected transient Configuration hadoopConf = null;
   protected transient SQLContext sqlContext;
   protected transient FileSystem fs;
-  protected transient HoodieTestDataGenerator dataGen = null;
   protected transient ExecutorService executorService;
   protected transient HoodieTableMetaClient metaClient;
   protected transient SparkRDDWriteClient writeClient;
@@ -86,6 +85,11 @@ public abstract class HoodieClientTestHarness extends HoodieCommonTestHarness im
   protected transient HdfsTestService hdfsTestService;
   protected transient MiniDFSCluster dfsCluster;
   protected transient DistributedFileSystem dfs;
+
+  @AfterAll
+  public static void tearDownAll() throws IOException {
+    FileSystem.closeAll();
+  }
 
   @BeforeEach
   public void setTestMethodName(TestInfo testInfo) {
@@ -206,6 +210,10 @@ public abstract class HoodieClientTestHarness extends HoodieCommonTestHarness im
    * @throws IOException
    */
   protected void initMetaClient() throws IOException {
+    initMetaClient(getTableType());
+  }
+
+  protected void initMetaClient(HoodieTableType tableType) throws IOException {
     if (basePath == null) {
       throw new IllegalStateException("The base path has not been initialized.");
     }
@@ -214,7 +222,7 @@ public abstract class HoodieClientTestHarness extends HoodieCommonTestHarness im
       throw new IllegalStateException("The Spark context has not been initialized.");
     }
 
-    metaClient = HoodieTestUtils.init(context.getHadoopConf().get(), basePath, getTableType());
+    metaClient = HoodieTestUtils.init(hadoopConf, basePath, tableType);
   }
 
   /**
@@ -238,30 +246,11 @@ public abstract class HoodieClientTestHarness extends HoodieCommonTestHarness im
   }
 
   /**
-   * Initializes a test data generator which used to generate test datas.
-   *
-   */
-  protected void initTestDataGenerator() {
-    dataGen = new HoodieTestDataGenerator();
-  }
-
-  /**
-   * Cleanups test data generator.
-   *
-   */
-  protected void cleanupTestDataGenerator() {
-    if (dataGen != null) {
-      dataGen = null;
-    }
-  }
-
-  /**
    * Initializes a distributed file system and base directory.
    *
    * @throws IOException
    */
   protected void initDFS() throws IOException {
-    FileSystem.closeAll();
     hdfsTestService = new HdfsTestService();
     dfsCluster = hdfsTestService.start(true);
 
@@ -342,26 +331,22 @@ public abstract class HoodieClientTestHarness extends HoodieCommonTestHarness im
     }
   }
 
-  public SparkRDDWriteClient getHoodieWriteClient(HoodieWriteConfig cfg) {
-    return getHoodieWriteClient(cfg, false);
-  }
-
   public HoodieReadClient getHoodieReadClient(String basePath) {
     readClient = new HoodieReadClient(context, basePath, SQLContext.getOrCreate(jsc.sc()));
     return readClient;
   }
 
-  public SparkRDDWriteClient getHoodieWriteClient(HoodieWriteConfig cfg, boolean rollbackInflightCommit) {
+  public SparkRDDWriteClient getHoodieWriteClient(HoodieWriteConfig cfg) {
     if (null != writeClient) {
       writeClient.close();
       writeClient = null;
     }
-    writeClient = new SparkRDDWriteClient(context, cfg, rollbackInflightCommit);
+    writeClient = new SparkRDDWriteClient(context, cfg);
     return writeClient;
   }
 
   public HoodieTableMetaClient getHoodieMetaClient(Configuration conf, String basePath) {
-    metaClient = new HoodieTableMetaClient(conf, basePath);
+    metaClient = HoodieTableMetaClient.builder().setConf(conf).setBasePath(basePath).build();
     return metaClient;
   }
 

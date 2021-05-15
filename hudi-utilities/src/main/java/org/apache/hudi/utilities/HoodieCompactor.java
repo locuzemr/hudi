@@ -103,27 +103,28 @@ public class HoodieCompactor {
       System.exit(1);
     }
     final JavaSparkContext jsc = UtilHelpers.buildSparkContext("compactor-" + cfg.tableName, cfg.sparkMaster, cfg.sparkMemory);
-    HoodieCompactor compactor = new HoodieCompactor(jsc, cfg);
-    compactor.compact(cfg.retry);
+    try {
+      HoodieCompactor compactor = new HoodieCompactor(jsc, cfg);
+      compactor.compact(cfg.retry);
+    } catch (Throwable throwable) {
+      LOG.error("Fail to run compaction for " + cfg.tableName, throwable);
+    } finally {
+      jsc.stop();
+    }
   }
 
   public int compact(int retry) {
     this.fs = FSUtils.getFs(cfg.basePath, jsc.hadoopConfiguration());
-    int ret = -1;
-    try {
-      do {
-        if (cfg.runSchedule) {
-          if (null == cfg.strategyClassName) {
-            throw new IllegalArgumentException("Missing Strategy class name for running compaction");
-          }
-          ret = doSchedule(jsc);
-        } else {
-          ret = doCompact(jsc);
+    int ret = UtilHelpers.retry(retry, () -> {
+      if (cfg.runSchedule) {
+        if (null == cfg.strategyClassName) {
+          throw new IllegalArgumentException("Missing Strategy class name for running compaction");
         }
-      } while (ret != 0 && retry-- > 0);
-    } catch (Throwable t) {
-      LOG.error(t);
-    }
+        return doSchedule(jsc);
+      } else {
+        return doCompact(jsc);
+      }
+    }, "Compact failed");
     return ret;
   }
 

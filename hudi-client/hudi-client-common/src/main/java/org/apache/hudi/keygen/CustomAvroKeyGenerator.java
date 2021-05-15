@@ -44,7 +44,7 @@ import java.util.stream.Collectors;
 public class CustomAvroKeyGenerator extends BaseKeyGenerator {
 
   private static final String DEFAULT_PARTITION_PATH_SEPARATOR = "/";
-  private static final String SPLIT_REGEX = ":";
+  public static final String SPLIT_REGEX = ":";
 
   /**
    * Used as a part of config in CustomKeyGenerator.java.
@@ -88,7 +88,7 @@ public class CustomAvroKeyGenerator extends BaseKeyGenerator {
           try {
             partitionPath.append(new TimestampBasedAvroKeyGenerator(config, partitionPathField).getPartitionPath(record));
           } catch (IOException e) {
-            throw new HoodieKeyGeneratorException("Unable to initialise TimestampBasedKeyGenerator class");
+            throw new HoodieKeyGeneratorException("Unable to initialise TimestampBasedKeyGenerator class", e);
           }
           break;
         default:
@@ -116,9 +116,5 @@ public class CustomAvroKeyGenerator extends BaseKeyGenerator {
 
   public String getDefaultPartitionPathSeparator() {
     return DEFAULT_PARTITION_PATH_SEPARATOR;
-  }
-
-  public String getSplitRegex() {
-    return SPLIT_REGEX;
   }
 }

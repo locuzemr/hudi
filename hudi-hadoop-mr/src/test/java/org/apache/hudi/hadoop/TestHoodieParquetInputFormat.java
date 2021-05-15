@@ -28,7 +28,9 @@ import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.table.timeline.TimelineMetadataUtils;
+import org.apache.hudi.common.testutils.FileCreateUtils;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
+import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.hadoop.testutils.InputFormatTestUtil;
 import org.apache.hudi.hadoop.utils.HoodieHiveUtils;
 
@@ -50,13 +52,16 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
 import static org.apache.hudi.common.testutils.SchemaTestUtil.getSchemaFromResource;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 public class TestHoodieParquetInputFormat {
 
@@ -116,8 +121,6 @@ public class TestHoodieParquetInputFormat {
     assertFalse(filteredTimeline.containsInstant(t4));
     assertFalse(filteredTimeline.containsInstant(t5));
     assertFalse(filteredTimeline.containsInstant(t6));
-
-
     // remove compaction instant and setup timeline again
     instants.remove(t3);
     timeline = new HoodieActiveTimeline(metaClient);
@@ -191,6 +194,55 @@ public class TestHoodieParquetInputFormat {
   }
 
   @Test
+  public void testSnapshotWithInvalidCommitShouldThrowException() throws IOException {
+    File partitionDir = InputFormatTestUtil.prepareTable(basePath, baseFileFormat, 10, "100");
+    InputFormatTestUtil.commit(basePath, "100");
+
+    FileInputFormat.setInputPaths(jobConf, partitionDir.getPath());
+    InputFormatTestUtil.setupSnapshotIncludePendingCommits(jobConf, "1");
+    Exception exception = assertThrows(HoodieIOException.class, () -> inputFormat.listStatus(jobConf));
+    assertEquals("Valid timestamp is required for hoodie.%s.consume.commit in snapshot mode", exception.getMessage());
+
+    InputFormatTestUtil.setupSnapshotMaxCommitTimeQueryMode(jobConf, "1");
+    exception = assertThrows(HoodieIOException.class, () -> inputFormat.listStatus(jobConf));
+    assertEquals("Valid timestamp is required for hoodie.%s.consume.commit in snapshot mode", exception.getMessage());
+  }
+
+  @Test
+  public void testPointInTimeQueryWithUpdates() throws IOException {
+    // initial commit
+    File partitionDir = InputFormatTestUtil.prepareTable(basePath, baseFileFormat, 10, "100");
+    InputFormatTestUtil.commit(basePath, "100");
+
+    // Add the paths
+    FileInputFormat.setInputPaths(jobConf, partitionDir.getPath());
+
+    FileStatus[] files = inputFormat.listStatus(jobConf);
+    assertEquals(10, files.length);
+
+    // update files
+    InputFormatTestUtil.simulateUpdates(partitionDir, baseFileExtension, "100", 5, "200", true);
+    // Before the commit
+    files = inputFormat.listStatus(jobConf);
+    assertEquals(10, files.length);
+    ensureFilesInCommit("Commit 200 has not been committed. We should not see files from this commit", files, "200", 0);
+    InputFormatTestUtil.commit(basePath, "200");
+
+    InputFormatTestUtil.setupSnapshotMaxCommitTimeQueryMode(jobConf, "100");
+
+    files = inputFormat.listStatus(jobConf);
+    assertEquals(10, files.length);
+    ensureFilesInCommit("We shouldn't have any file pertaining to commit 200", files, "200", 0);
+    ensureFilesInCommit("All files should be from commit 100", files, "100", 10);
+
+    InputFormatTestUtil.setupSnapshotMaxCommitTimeQueryMode(jobConf, "200");
+    files = inputFormat.listStatus(jobConf);
+    assertEquals(10, files.length);
+    ensureFilesInCommit("5 files for commit 200", files, "200", 5);
+    ensureFilesInCommit("5 files for commit 100", files, "100", 5);
+  }
+
+  @Test
   public void testInputFormatWithCompaction() throws IOException {
     // initial commit
     File partitionDir = InputFormatTestUtil.prepareTable(basePath, baseFileFormat, 10, "100");
@@ -237,6 +289,65 @@ public class TestHoodieParquetInputFormat {
     FileStatus[] files = inputFormat.listStatus(jobConf);
     assertEquals(0, files.length,
         "We should exclude commit 100 when returning incremental pull with start commit time as 100");
+  }
+
+  @Test
+  public void testMultiPartitionTableIncremental() throws IOException {
+    // initial commit
+    java.nio.file.Path tablePath = Paths.get(basePath.toString(), "raw_trips");
+
+    // create hudi table and insert data to it
+    // create only one file
+    File partitionDir1 = InputFormatTestUtil
+        .prepareMultiPartitionTable(basePath, baseFileFormat, 1, "100", "1");
+    createCommitFile(basePath, "100", "2016/05/1");
+
+    // insert new data to partition "2016/05/11"
+    // create only one file
+    File partitionDir2 = InputFormatTestUtil
+        .prepareMultiPartitionTable(basePath, baseFileFormat, 1, "100", "11");
+    createCommitFile(basePath, "101", "2016/05/11");
+
+
+    // now partitionDir2.getPath().contain(partitionDir1.getPath()), and hudi-1817 will occur
+    assertEquals(true, partitionDir2.getPath().contains(partitionDir1.getPath()));
+
+    // set partitionDir2 to be the inputPaths of current inputFormat
+    FileInputFormat.setInputPaths(jobConf, partitionDir2.getPath());
+
+    // set incremental startCommit=0 and numberOfCommitsToPull=3  to pull all the data from hudi table
+    InputFormatTestUtil.setupIncremental(jobConf, "0", 3);
+
+    FileStatus[] files = inputFormat.listStatus(jobConf);
+    assertEquals(1, files.length,
+        "We should get one file from partition: " + partitionDir2.getPath());
+  }
+
+  @Test
+  public void testIncrementalEmptyPartitions() throws IOException {
+    // initial commit
+    File partitionDir = InputFormatTestUtil.prepareTable(basePath, baseFileFormat, 10, "100");
+    createCommitFile(basePath, "100", "2016/05/01");
+
+    // Add the paths
+    FileInputFormat.setInputPaths(jobConf, partitionDir.getPath());
+
+    InputFormatTestUtil.setupIncremental(jobConf, "000", 1);
+
+    FileStatus[] files = inputFormat.listStatus(jobConf);
+    assertEquals(10, files.length,
+        "We should include only 1 commit 100 when returning incremental pull with start commit time as 100");
+    ensureFilesInCommit("Pulling 1 commits from 000, should get us the 10 files from 100 commit", files, "100", 10);
+
+    // Add new commit only to a new partition
+    partitionDir = InputFormatTestUtil.prepareTable(basePath, baseFileFormat, 10, "200");
+    createCommitFile(basePath, "200", "2017/05/01");
+
+    InputFormatTestUtil.setupIncremental(jobConf, "100", 1);
+    files = inputFormat.listStatus(jobConf);
+
+    assertEquals(0, files.length,
+        "We should exclude commit 200 when returning incremental pull with start commit time as 100 as filePaths does not include new partition");
   }
 
   private void createCommitFile(java.nio.file.Path basePath, String commitNumber, String partitionPath)
@@ -355,7 +466,7 @@ public class TestHoodieParquetInputFormat {
     String incrementalMode1 = String.format(HoodieHiveUtils.HOODIE_CONSUME_MODE_PATTERN, expectedincrTables[0]);
     conf.set(incrementalMode1, HoodieHiveUtils.INCREMENTAL_SCAN_MODE);
     String incrementalMode2 = String.format(HoodieHiveUtils.HOODIE_CONSUME_MODE_PATTERN, expectedincrTables[1]);
-    conf.set(incrementalMode2,HoodieHiveUtils.INCREMENTAL_SCAN_MODE);
+    conf.set(incrementalMode2, HoodieHiveUtils.INCREMENTAL_SCAN_MODE);
     String incrementalMode3 = String.format(HoodieHiveUtils.HOODIE_CONSUME_MODE_PATTERN, "db3.model_trips");
     conf.set(incrementalMode3, HoodieHiveUtils.INCREMENTAL_SCAN_MODE.toLowerCase());
     String defaultmode = String.format(HoodieHiveUtils.HOODIE_CONSUME_MODE_PATTERN, "db3.first_trips");
@@ -401,6 +512,49 @@ public class TestHoodieParquetInputFormat {
     ensureFilesInCommit("Pulling all commit from beginning, should return instants after requested compaction",
         files, "400", 10);
 
+  }
+
+  @Test
+  public void testSnapshotPreCommitValidate() throws IOException {
+    // initial commit
+    File partitionDir = InputFormatTestUtil.prepareTable(basePath, baseFileFormat, 10, "100");
+    createCommitFile(basePath, "100", "2016/05/01");
+
+    // Add the paths
+    FileInputFormat.setInputPaths(jobConf, partitionDir.getPath());
+    FileStatus[] files = inputFormat.listStatus(jobConf);
+    assertEquals(10, files.length, "Snapshot read must return all files in partition");
+
+    // add more files
+    InputFormatTestUtil.simulateInserts(partitionDir, baseFileExtension, "fileId2-", 5, "200");
+    FileCreateUtils.createInflightCommit(basePath.toString(), "200");
+
+    // Verify that validate mode reads uncommitted files
+    InputFormatTestUtil.setupSnapshotIncludePendingCommits(jobConf, "200");
+    files = inputFormat.listStatus(jobConf);
+    assertEquals(15, files.length, "Must return uncommitted files");
+    ensureFilesInCommit("Pulling 1 commit from 100, should get us the 5 files committed at 200", files, "200", 5);
+    ensureFilesInCommit("Pulling 1 commit from 100, should get us the 10 files committed at 100", files, "100", 10);
+
+    try {
+      // Verify that Validate mode throws error with invalid commit time
+      InputFormatTestUtil.setupSnapshotIncludePendingCommits(jobConf, "300"); 
+      inputFormat.listStatus(jobConf);
+      fail("Expected list status to fail when validate is called with unknown timestamp");
+    } catch (HoodieIOException e) {
+      // expected because validate is called with invalid instantTime
+    }
+    
+    //Creating a new jobCOnf Object because old one has hoodie.%.consume.commit set
+    jobConf = new JobConf();
+    inputFormat.setConf(jobConf);
+    FileInputFormat.setInputPaths(jobConf, partitionDir.getPath());
+
+    // verify that snapshot mode skips uncommitted files
+    InputFormatTestUtil.setupSnapshotScanMode(jobConf);
+    files = inputFormat.listStatus(jobConf);
+    assertEquals(10, files.length, "snapshot scan mode must not return uncommitted files");
+    ensureFilesInCommit("Pulling 1 commit from 100, should get us the 10 files committed at 100", files, "100", 10);
   }
 
   private void ensureRecordsInCommit(String msg, String commit, int expectedNumberOfRecordsInCommit,

@@ -109,7 +109,7 @@ public interface HoodieTimeline extends Serializable {
   /**
    * Filter this timeline to just include the in-flights excluding compaction instants.
    *
-   * @return New instance of HoodieTimeline with just in-flights excluding compaction inflights
+   * @return New instance of HoodieTimeline with just in-flights excluding compaction instants
    */
   HoodieTimeline filterPendingExcludingCompaction();
 
@@ -131,11 +131,11 @@ public interface HoodieTimeline extends Serializable {
   HoodieTimeline filterCompletedAndCompactionInstants();
 
   /**
-   * Timeline to just include commits (commit/deltacommit) and compaction actions.
+   * Timeline to just include commits (commit/deltacommit), compaction and replace actions.
    * 
    * @return
    */
-  HoodieTimeline getCommitsAndCompactionTimeline();
+  HoodieTimeline getWriteTimeline();
 
   /**
    * Timeline to just include replace instants that have valid (commit/deltacommit) actions.
@@ -156,7 +156,6 @@ public interface HoodieTimeline extends Serializable {
    */
   HoodieTimeline filterPendingReplaceTimeline();
 
-
   /**
    * Create a new Timeline with all the instants after startTs.
    */
@@ -173,10 +172,20 @@ public interface HoodieTimeline extends Serializable {
   HoodieTimeline findInstantsAfter(String instantTime, int numCommits);
 
   /**
+   * Create a new Timeline with all the instants after startTs.
+   */
+  HoodieTimeline findInstantsAfter(String instantTime);
+
+  /**
    * Create a new Timeline with all instants before specified time.
    */
   HoodieTimeline findInstantsBefore(String instantTime);
 
+  /**
+   * Create new timeline with all instants before or equals specified time.
+   */
+  HoodieTimeline findInstantsBeforeOrEquals(String instantTime);
+  
   /**
    * Custom Filter of Instants.
    */
@@ -226,6 +235,11 @@ public interface HoodieTimeline extends Serializable {
    * @return true if the passed instant is present as a completed instant on the timeline
    */
   boolean containsInstant(HoodieInstant instant);
+
+  /**
+   * @return true if the passed instant is present as a completed instant on the timeline
+   */
+  boolean containsInstant(String ts);
 
   /**
    * @return true if the passed instant is present as a completed instant on the timeline or if the instant is before
@@ -297,6 +311,14 @@ public interface HoodieTimeline extends Serializable {
 
   static HoodieInstant getCompactionInflightInstant(final String timestamp) {
     return new HoodieInstant(State.INFLIGHT, COMPACTION_ACTION, timestamp);
+  }
+
+  static HoodieInstant getReplaceCommitRequestedInstant(final String timestamp) {
+    return new HoodieInstant(State.REQUESTED, REPLACE_COMMIT_ACTION, timestamp);
+  }
+
+  static HoodieInstant getReplaceCommitInflightInstant(final String timestamp) {
+    return new HoodieInstant(State.INFLIGHT, REPLACE_COMMIT_ACTION, timestamp);
   }
 
   /**

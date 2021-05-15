@@ -31,6 +31,7 @@ import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
+import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.table.timeline.TimelineMetadataUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.exception.HoodieIOException;
@@ -68,27 +69,53 @@ public class ClusteringUtils {
         .filter(Option::isPresent).map(Option::get);
   }
 
-  public static Option<Pair<HoodieInstant, HoodieClusteringPlan>> getClusteringPlan(HoodieTableMetaClient metaClient, HoodieInstant requestedReplaceInstant) {
+  /**
+   * Get requested replace metadata from timeline.
+   * @param metaClient
+   * @param pendingReplaceInstant
+   * @return
+   * @throws IOException
+   */
+  public static Option<HoodieRequestedReplaceMetadata> getRequestedReplaceMetadata(HoodieTableMetaClient metaClient, HoodieInstant pendingReplaceInstant) throws IOException {
+    final HoodieInstant requestedInstant;
+    if (!pendingReplaceInstant.isRequested()) {
+      // inflight replacecommit files don't have clustering plan.
+      // This is because replacecommit inflight can have workload profile for 'insert_overwrite'.
+      // Get the plan from corresponding requested instant.
+      requestedInstant = HoodieTimeline.getReplaceCommitRequestedInstant(pendingReplaceInstant.getTimestamp());
+    } else {
+      requestedInstant = pendingReplaceInstant;
+    }
+    Option<byte[]> content = metaClient.getActiveTimeline().getInstantDetails(requestedInstant);
+    if (!content.isPresent() || content.get().length == 0) {
+      // few operations create requested file without any content. Assume these are not clustering
+      LOG.warn("No content found in requested file for instant " + pendingReplaceInstant);
+      return Option.empty();
+    }
+    return Option.of(TimelineMetadataUtils.deserializeRequestedReplaceMetadata(content.get()));
+  }
+
+  /**
+   * Get Clustering plan from timeline.
+   * @param metaClient
+   * @param pendingReplaceInstant
+   * @return
+   */
+  public static Option<Pair<HoodieInstant, HoodieClusteringPlan>> getClusteringPlan(HoodieTableMetaClient metaClient, HoodieInstant pendingReplaceInstant) {
     try {
-      Option<byte[]> content = metaClient.getActiveTimeline().getInstantDetails(requestedReplaceInstant);
-      if (!content.isPresent() || content.get().length == 0) {
-        // few operations create requested file without any content. Assume these are not clustering
-        LOG.warn("No content found in requested file for instant " + requestedReplaceInstant);
-        return Option.empty();
-      }
-      HoodieRequestedReplaceMetadata requestedReplaceMetadata = TimelineMetadataUtils.deserializeRequestedReplaceMetadta(content.get());
-      if (WriteOperationType.CLUSTER.name().equals(requestedReplaceMetadata.getOperationType())) {
-        return Option.of(Pair.of(requestedReplaceInstant, requestedReplaceMetadata.getClusteringPlan()));
+      Option<HoodieRequestedReplaceMetadata> requestedReplaceMetadata = getRequestedReplaceMetadata(metaClient, pendingReplaceInstant);
+      if (requestedReplaceMetadata.isPresent() && WriteOperationType.CLUSTER.name().equals(requestedReplaceMetadata.get().getOperationType())) {
+        return Option.of(Pair.of(pendingReplaceInstant, requestedReplaceMetadata.get().getClusteringPlan()));
       }
       return Option.empty();
     } catch (IOException e) {
-      throw new HoodieIOException("Error reading clustering plan " + requestedReplaceInstant.getTimestamp(), e);
+      throw new HoodieIOException("Error reading clustering plan " + pendingReplaceInstant.getTimestamp(), e);
     }
   }
 
   /**
    * Get filegroups to pending clustering instant mapping for all pending clustering plans.
-   * This includes all clustering operattions in 'requested' and 'inflight' states.
+   * This includes all clustering operations in 'requested' and 'inflight' states.
    */
   public static Map<HoodieFileGroupId, HoodieInstant> getAllFileGroupsInPendingClusteringPlans(
       HoodieTableMetaClient metaClient) {
@@ -114,7 +141,11 @@ public class ClusteringUtils {
         new AbstractMap.SimpleEntry<>(entry.getLeft(), entry.getRight()));
   }
 
-  private static Stream<HoodieFileGroupId> getFileGroupsFromClusteringGroup(HoodieClusteringGroup group) {
+  public static Stream<HoodieFileGroupId> getFileGroupsFromClusteringPlan(HoodieClusteringPlan clusteringPlan) {
+    return clusteringPlan.getInputGroups().stream().flatMap(ClusteringUtils::getFileGroupsFromClusteringGroup);
+  }
+
+  public static Stream<HoodieFileGroupId> getFileGroupsFromClusteringGroup(HoodieClusteringGroup group) {
     return group.getSlices().stream().map(slice -> new HoodieFileGroupId(slice.getPartitionPath(), slice.getFileId()));
   }
 

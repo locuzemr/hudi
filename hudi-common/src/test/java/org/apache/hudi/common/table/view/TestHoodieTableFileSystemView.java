@@ -306,7 +306,7 @@ public class TestHoodieTableFileSystemView extends HoodieCommonTestHarness {
     String partitionPath = "2016/05/01";
     new File(basePath + "/" + partitionPath).mkdirs();
     String fileId = UUID.randomUUID().toString();
-    String srcName = "part_0000.parquet";
+    String srcName = "part_0000" + metaClient.getTableConfig().getBaseFileFormat().getFileExtension();
     HoodieFileStatus srcFileStatus = HoodieFileStatus.newBuilder()
         .setPath(HoodiePath.newBuilder().setUri(BOOTSTRAP_SOURCE_PATH + partitionPath + "/" + srcName).build())
         .setLength(256 * 1024 * 1024L)
@@ -1354,6 +1354,13 @@ public class TestHoodieTableFileSystemView extends HoodieCommonTestHarness {
     assertEquals(0, replacedOnInstant1.size());
 
     List<HoodieFileGroup> allReplaced = fsView.getReplacedFileGroupsBeforeOrOn("2", partitionPath1).collect(Collectors.toList());
+    assertEquals(1, allReplaced.size());
+    assertEquals(fileId1, allReplaced.get(0).getFileGroupId().getFileId());
+
+    allReplaced = fsView.getReplacedFileGroupsBefore("2", partitionPath1).collect(Collectors.toList());
+    assertEquals(0, allReplaced.size());
+
+    allReplaced = fsView.getAllReplacedFileGroups(partitionPath1).collect(Collectors.toList());
     assertEquals(1, allReplaced.size());
     assertEquals(fileId1, allReplaced.get(0).getFileGroupId().getFileId());
   }

@@ -24,6 +24,7 @@ import org.apache.hudi.common.model.HoodieRecordPayload;
 import org.apache.hudi.common.util.DefaultSizeEstimator;
 import org.apache.hudi.common.util.HoodieRecordSizeEstimator;
 import org.apache.hudi.common.util.HoodieTimer;
+import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.SpillableMapUtils;
 import org.apache.hudi.common.util.collection.ExternalSpillableMap;
 import org.apache.hudi.exception.HoodieIOException;
@@ -57,39 +58,49 @@ public class HoodieMergedLogRecordScanner extends AbstractHoodieLogRecordScanner
   private static final Logger LOG = LogManager.getLogger(HoodieMergedLogRecordScanner.class);
 
   // Final map of compacted/merged records
-  private final ExternalSpillableMap<String, HoodieRecord<? extends HoodieRecordPayload>> records;
+  protected final ExternalSpillableMap<String, HoodieRecord<? extends HoodieRecordPayload>> records;
 
   // count of merged records in log
   private long numMergedRecordsInLog;
+  private long maxMemorySizeInBytes;
 
   // Stores the total time taken to perform reading and merging of log blocks
-  private final long totalTimeTakenToReadAndMergeBlocks;
+  private long totalTimeTakenToReadAndMergeBlocks;
   // A timer for calculating elapsed time in millis
   public final HoodieTimer timer = new HoodieTimer();
 
   @SuppressWarnings("unchecked")
-  public HoodieMergedLogRecordScanner(FileSystem fs, String basePath, List<String> logFilePaths, Schema readerSchema,
-      String latestInstantTime, Long maxMemorySizeInBytes, boolean readBlocksLazily, boolean reverseReader,
-      int bufferSize, String spillableMapBasePath) {
-    super(fs, basePath, logFilePaths, readerSchema, latestInstantTime, readBlocksLazily, reverseReader, bufferSize);
+  protected HoodieMergedLogRecordScanner(FileSystem fs, String basePath, List<String> logFilePaths, Schema readerSchema,
+                                      String latestInstantTime, Long maxMemorySizeInBytes, boolean readBlocksLazily,
+                                      boolean reverseReader, int bufferSize, String spillableMapBasePath,
+                                      Option<InstantRange> instantRange, boolean autoScan) {
+    super(fs, basePath, logFilePaths, readerSchema, latestInstantTime, readBlocksLazily, reverseReader, bufferSize, instantRange);
     try {
       // Store merged records for all versions for this log file, set the in-memory footprint to maxInMemoryMapSize
       this.records = new ExternalSpillableMap<>(maxMemorySizeInBytes, spillableMapBasePath, new DefaultSizeEstimator(),
           new HoodieRecordSizeEstimator(readerSchema));
-      // Do the scan and merge
-      timer.startTimer();
-      scan();
-      this.totalTimeTakenToReadAndMergeBlocks = timer.endTimer();
-      this.numMergedRecordsInLog = records.size();
-      LOG.info("MaxMemoryInBytes allowed for compaction => " + maxMemorySizeInBytes);
-      LOG.info("Number of entries in MemoryBasedMap in ExternalSpillableMap => " + records.getInMemoryMapNumEntries());
-      LOG.info(
-          "Total size in bytes of MemoryBasedMap in ExternalSpillableMap => " + records.getCurrentInMemoryMapSize());
-      LOG.info("Number of entries in DiskBasedMap in ExternalSpillableMap => " + records.getDiskBasedMapNumEntries());
-      LOG.info("Size of file spilled to disk => " + records.getSizeOfFileOnDiskInBytes());
     } catch (IOException e) {
-      throw new HoodieIOException("IOException when reading log file ", e);
+      throw new HoodieIOException("IOException when creating ExternalSpillableMap at " + spillableMapBasePath, e);
     }
+
+    if (autoScan) {
+      performScan();
+    }
+  }
+
+  protected void performScan() {
+    // Do the scan and merge
+    timer.startTimer();
+    scan();
+    this.totalTimeTakenToReadAndMergeBlocks = timer.endTimer();
+    this.numMergedRecordsInLog = records.size();
+    LOG.info("Number of log files scanned => " + logFilePaths.size());
+    LOG.info("MaxMemoryInBytes allowed for compaction => " + maxMemorySizeInBytes);
+    LOG.info("Number of entries in MemoryBasedMap in ExternalSpillableMap => " + records.getInMemoryMapNumEntries());
+    LOG.info(
+        "Total size in bytes of MemoryBasedMap in ExternalSpillableMap => " + records.getCurrentInMemoryMapSize());
+    LOG.info("Number of entries in DiskBasedMap in ExternalSpillableMap => " + records.getDiskBasedMapNumEntries());
+    LOG.info("Size of file spilled to disk => " + records.getSizeOfFileOnDiskInBytes());
   }
 
   @Override
@@ -136,21 +147,31 @@ public class HoodieMergedLogRecordScanner extends AbstractHoodieLogRecordScanner
     return totalTimeTakenToReadAndMergeBlocks;
   }
 
+  public void close() {
+    if (records != null) {
+      records.close();
+    }
+  }
+
   /**
    * Builder used to build {@code HoodieUnMergedLogRecordScanner}.
    */
   public static class Builder extends AbstractHoodieLogRecordScanner.Builder {
-    private FileSystem fs;
-    private String basePath;
-    private List<String> logFilePaths;
-    private Schema readerSchema;
-    private String latestInstantTime;
-    private boolean readBlocksLazily;
-    private boolean reverseReader;
-    private int bufferSize;
+    protected FileSystem fs;
+    protected String basePath;
+    protected List<String> logFilePaths;
+    protected Schema readerSchema;
+    protected String latestInstantTime;
+    protected boolean readBlocksLazily;
+    protected boolean reverseReader;
+    protected int bufferSize;
     // specific configurations
-    private Long maxMemorySizeInBytes;
-    private String spillableMapBasePath;
+    protected Long maxMemorySizeInBytes;
+    protected String spillableMapBasePath;
+    // incremental filtering
+    private Option<InstantRange> instantRange = Option.empty();
+    // auto scan default true
+    private boolean autoScan = true;
 
     public Builder withFileSystem(FileSystem fs) {
       this.fs = fs;
@@ -192,6 +213,11 @@ public class HoodieMergedLogRecordScanner extends AbstractHoodieLogRecordScanner
       return this;
     }
 
+    public Builder withInstantRange(Option<InstantRange> instantRange) {
+      this.instantRange = instantRange;
+      return this;
+    }
+
     public Builder withMaxMemorySizeInBytes(Long maxMemorySizeInBytes) {
       this.maxMemorySizeInBytes = maxMemorySizeInBytes;
       return this;
@@ -202,11 +228,16 @@ public class HoodieMergedLogRecordScanner extends AbstractHoodieLogRecordScanner
       return this;
     }
 
+    public Builder withAutoScan(boolean autoScan) {
+      this.autoScan = autoScan;
+      return this;
+    }
+
     @Override
     public HoodieMergedLogRecordScanner build() {
       return new HoodieMergedLogRecordScanner(fs, basePath, logFilePaths, readerSchema,
           latestInstantTime, maxMemorySizeInBytes, readBlocksLazily, reverseReader,
-          bufferSize, spillableMapBasePath);
+          bufferSize, spillableMapBasePath, instantRange, autoScan);
     }
   }
 }
